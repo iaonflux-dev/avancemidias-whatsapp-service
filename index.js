@@ -18,9 +18,14 @@ for (const v of REQUIRED) {
   }
 }
 
+console.log('[ENV] SUPABASE_URL:', process.env.SUPABASE_URL ? '✅ definida' : '❌ ausente');
+console.log('[ENV] SUPABASE_SERVICE_ROLE_KEY:', process.env.SUPABASE_SERVICE_ROLE_KEY ? '✅ definida' : '❌ ausente');
+console.log('[ENV] WORKSPACE_ID:', process.env.WORKSPACE_ID ? '✅ definida' : '❌ ausente');
+console.log('[ENV] CHAT_AGENT_URL:', process.env.CHAT_AGENT_URL ? '✅ definida' : '❌ ausente');
+
 const logger = pino({ level: "warn" });
 const AUTH_DIR = process.env.AUTH_DIR ?? "./auth";
-let sock;
+export let sock;
 
 async function startSocket() {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
@@ -76,7 +81,7 @@ async function startSocket() {
       const phone = "+" + remoteJid.split("@")[0];
 
       try {
-        await handleIncomingMessage({ phone, text }, async (reply) => {
+        await handleIncomingMessage({ phone, text, remoteJid }, async (reply) => {
           await sock.sendMessage(remoteJid, { text: reply });
           console.log(`[MSG] → ${phone}: ${reply}`);
         });
