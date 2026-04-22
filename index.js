@@ -79,9 +79,10 @@ async function startSocket() {
       if (!text) continue;
 
       const phone = "+" + remoteJid.split("@")[0];
+      const messageId = m.key.id;
 
       try {
-        await handleIncomingMessage({ phone, text, remoteJid }, async (reply) => {
+        await handleIncomingMessage({ phone, text, remoteJid, messageId }, async (reply) => {
           await sock.sendMessage(remoteJid, { text: reply });
           console.log(`[MSG] → ${phone}: ${reply}`);
         });
