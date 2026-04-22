@@ -20,6 +20,12 @@ async function getAgentConfig() {
 // Debounce: agrupa mensagens em sequência por telefone
 const pendingMessages = new Map(); // phone -> { timer, messages[], sendReply, remoteJid }
 
+// Mapa para evitar processamento duplicado de mensagens (mesmo messageId)
+const processingMessages = new Map(); // messageId -> timestamp
+
+// Lock por telefone para evitar processamento paralelo de mensagens do mesmo lead
+const processingLocks = new Map(); // phone -> boolean
+
 /**
  * Garante que existe um lead para o número e retorna { lead, conversation }.
  */
@@ -106,10 +112,20 @@ async function callAgent(messages, leadPhone) {
 /**
  * Processa uma mensagem recebida do WhatsApp e devolve a resposta do agente.
  * Faz debounce: agrupa mensagens em sequência rápida antes de chamar o agente.
- * @param {{ phone: string, text: string, remoteJid?: string }} input
+ * @param {{ phone: string, text: string, remoteJid?: string, messageId?: string }} input
  * @param {(text: string) => Promise<void>} sendReply
  */
-export async function handleIncomingMessage({ phone, text, remoteJid }, sendReply) {
+export async function handleIncomingMessage({ phone, text, remoteJid, messageId }, sendReply) {
+  // Deduplicação: ignora se a mesma mensagem já foi processada recentemente
+  if (messageId && processingMessages.has(messageId)) {
+    console.log(`[MSG] Duplicata ignorada: ${messageId}`);
+    return;
+  }
+  if (messageId) {
+    processingMessages.set(messageId, Date.now());
+    setTimeout(() => processingMessages.delete(messageId), 10_000);
+  }
+
   console.log(`[MSG] ← ${phone}: ${text}`);
 
   const cfg = await getAgentConfig();
@@ -151,7 +167,37 @@ export async function handleIncomingMessage({ phone, text, remoteJid }, sendRepl
  * Lógica original: processa uma mensagem (já agrupada se for o caso).
  */
 async function processMessage({ phone, text, remoteJid }, sendReply) {
+  // Aguarda lock se já houver processamento em andamento para esse telefone
+  if (processingLocks.get(phone)) {
+    console.log(`[MSG] Aguardando lock para ${phone}`);
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+
+  processingLocks.set(phone, true);
+  try {
+    await _doProcessMessage({ phone, text, remoteJid }, sendReply);
+  } finally {
+    processingLocks.set(phone, false);
+  }
+}
+
+async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
   console.log(`[MSG] ← ${phone}: ${text}`);
+
+  // 0) Verifica se o WhatsApp está conectado no Supabase. Se foi desconectado
+  //    pela UI, o agente para imediatamente de responder.
+  const { data: session } = await supabase
+    .from("whatsapp_sessions")
+    .select("status")
+    .eq("workspace_id", process.env.WORKSPACE_ID)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (!session || session.status !== "connected") {
+    console.log(`[MSG] Agente pausado — WhatsApp desconectado. Ignorando mensagem de ${phone}`);
+    return;
+  }
 
   // 1) horário de atendimento
   const window = await isWithinBusinessHours();
