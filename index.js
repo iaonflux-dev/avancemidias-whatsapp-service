@@ -6,6 +6,7 @@ import {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
+  downloadMediaMessage,
 } from "@whiskeysockets/baileys";
 import { publishQr, publishConnected, publishDisconnected, ping } from "./qr-handler.js";
 import { handleIncomingMessage } from "./message-handler.js";
@@ -18,6 +19,13 @@ for (const v of REQUIRED) {
   }
 }
 
+// URL da função de transcrição (derivada do CHAT_AGENT_URL trocando o nome).
+// Pode ser sobrescrita via env TRANSCRIBE_AUDIO_URL.
+const TRANSCRIBE_AUDIO_URL =
+  process.env.TRANSCRIBE_AUDIO_URL ??
+  process.env.CHAT_AGENT_URL.replace(/\/chat-agent\/?$/, "/transcribe-audio");
+console.log("[ENV] TRANSCRIBE_AUDIO_URL:", TRANSCRIBE_AUDIO_URL);
+
 console.log('[ENV] SUPABASE_URL:', process.env.SUPABASE_URL ? '✅ definida' : '❌ ausente');
 console.log('[ENV] SUPABASE_SERVICE_ROLE_KEY:', process.env.SUPABASE_SERVICE_ROLE_KEY ? '✅ definida' : '❌ ausente');
 console.log('[ENV] WORKSPACE_ID:', process.env.WORKSPACE_ID ? '✅ definida' : '❌ ausente');
@@ -26,6 +34,36 @@ console.log('[ENV] CHAT_AGENT_URL:', process.env.CHAT_AGENT_URL ? '✅ definida'
 const logger = pino({ level: "warn" });
 const AUTH_DIR = process.env.AUTH_DIR ?? "./auth";
 export let sock;
+
+function unwrapMessageContent(message) {
+  let current = message;
+
+  while (current) {
+    if (current.ephemeralMessage?.message) {
+      current = current.ephemeralMessage.message;
+      continue;
+    }
+    if (current.viewOnceMessage?.message) {
+      current = current.viewOnceMessage.message;
+      continue;
+    }
+    if (current.viewOnceMessageV2?.message) {
+      current = current.viewOnceMessageV2.message;
+      continue;
+    }
+    if (current.viewOnceMessageV2Extension?.message) {
+      current = current.viewOnceMessageV2Extension.message;
+      continue;
+    }
+    if (current.documentWithCaptionMessage?.message) {
+      current = current.documentWithCaptionMessage.message;
+      continue;
+    }
+    return current;
+  }
+
+  return message;
+}
 
 async function startSocket() {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
@@ -71,11 +109,59 @@ async function startSocket() {
       // Ignora grupos e status
       if (!remoteJid || remoteJid.endsWith("@g.us") || remoteJid === "status@broadcast") continue;
 
-      const text =
-        m.message.conversation ??
-        m.message.extendedTextMessage?.text ??
-        m.message.imageMessage?.caption ??
+      const content = unwrapMessageContent(m.message);
+
+      let text =
+        content.conversation ??
+        content.extendedTextMessage?.text ??
+        content.imageMessage?.caption ??
         null;
+
+      // Se for mensagem de áudio (voice note ou áudio enviado), transcreve
+      // antes de seguir o fluxo normal.
+      const audioMsg = content.audioMessage;
+      if (!text && audioMsg) {
+        try {
+          console.log(`[AUDIO] ← ${remoteJid} (${audioMsg.seconds ?? "?"}s, ${audioMsg.mimetype ?? "audio/ogg"})`);
+          const mediaMessage = { ...m, message: content };
+          const buffer = await downloadMediaMessage(mediaMessage, "buffer", {}, {
+            logger,
+            reuploadRequest: (msg) => sock.updateMediaMessage(msg),
+          });
+          const audio_base64 = buffer.toString("base64");
+          const mime_type = audioMsg.mimetype?.split(";")[0] ?? "audio/ogg";
+
+          const resp = await fetch(TRANSCRIBE_AUDIO_URL, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}`,
+            },
+            body: JSON.stringify({
+              workspace_id: process.env.WORKSPACE_ID,
+              audio_base64,
+              mime_type,
+              language_hint: "pt-BR",
+            }),
+          });
+
+          if (!resp.ok) {
+            console.error(`[AUDIO] transcribe-audio ${resp.status}: ${await resp.text()}`);
+            continue;
+          }
+          const data = await resp.json();
+          text = (data?.text ?? "").trim();
+          if (!text) {
+            console.log("[AUDIO] transcrição vazia, ignorando");
+            continue;
+          }
+          console.log(`[AUDIO] transcrito: ${text.slice(0, 120)}${text.length > 120 ? "…" : ""}`);
+        } catch (e) {
+          console.error("[AUDIO] erro ao transcrever:", e);
+          continue;
+        }
+      }
+
       if (!text) continue;
 
       const phone = "+" + remoteJid.split("@")[0];
