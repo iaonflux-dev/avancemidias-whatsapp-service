@@ -1,7 +1,24 @@
 import { createClient } from "@supabase/supabase-js";
 import { isWithinBusinessHours } from "./scheduler.js";
+import { sock } from "./index.js";
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+
+// Cache leve da config do agente (10s)
+let cfgCache = { data: null, ts: 0 };
+async function getAgentConfig() {
+  if (cfgCache.data && Date.now() - cfgCache.ts < 10_000) return cfgCache.data;
+  const { data } = await supabase
+    .from("agent_configs")
+    .select("simulate_typing, message_debounce_enabled, message_debounce_seconds")
+    .eq("workspace_id", process.env.WORKSPACE_ID)
+    .maybeSingle();
+  cfgCache = { data: data ?? {}, ts: Date.now() };
+  return cfgCache.data;
+}
+
+// Debounce: agrupa mensagens em sequência por telefone
+const pendingMessages = new Map(); // phone -> { timer, messages[], sendReply, remoteJid }
 
 /**
  * Garante que existe um lead para o número e retorna { lead, conversation }.
@@ -88,10 +105,52 @@ async function callAgent(messages, leadPhone) {
 
 /**
  * Processa uma mensagem recebida do WhatsApp e devolve a resposta do agente.
- * @param {{ phone: string, text: string }} input
+ * Faz debounce: agrupa mensagens em sequência rápida antes de chamar o agente.
+ * @param {{ phone: string, text: string, remoteJid?: string }} input
  * @param {(text: string) => Promise<void>} sendReply
  */
-export async function handleIncomingMessage({ phone, text }, sendReply) {
+export async function handleIncomingMessage({ phone, text, remoteJid }, sendReply) {
+  console.log(`[MSG] ← ${phone}: ${text}`);
+
+  const cfg = await getAgentConfig();
+  const debounceEnabled = cfg.message_debounce_enabled ?? true;
+  const debounceSeconds = Math.max(1, Math.min(10, cfg.message_debounce_seconds ?? 3));
+
+  // Sem debounce: processa imediatamente
+  if (!debounceEnabled) {
+    await processMessage({ phone, text, remoteJid }, sendReply);
+    return;
+  }
+
+  // Com debounce: agrupa mensagens em sequência
+  const existing = pendingMessages.get(phone);
+  if (existing) {
+    clearTimeout(existing.timer);
+    existing.messages.push(text);
+    existing.sendReply = sendReply;
+    existing.remoteJid = remoteJid;
+  } else {
+    pendingMessages.set(phone, { timer: null, messages: [text], sendReply, remoteJid });
+  }
+
+  const entry = pendingMessages.get(phone);
+  entry.timer = setTimeout(async () => {
+    const pending = pendingMessages.get(phone);
+    if (!pending) return;
+    pendingMessages.delete(phone);
+    const fullText = pending.messages.join(" ");
+    try {
+      await processMessage({ phone, text: fullText, remoteJid: pending.remoteJid }, pending.sendReply);
+    } catch (e) {
+      console.error("[DEBOUNCE] processMessage error:", e);
+    }
+  }, debounceSeconds * 1000);
+}
+
+/**
+ * Lógica original: processa uma mensagem (já agrupada se for o caso).
+ */
+async function processMessage({ phone, text, remoteJid }, sendReply) {
   console.log(`[MSG] ← ${phone}: ${text}`);
 
   // 1) horário de atendimento
@@ -117,6 +176,18 @@ export async function handleIncomingMessage({ phone, text }, sendReply) {
 
   // 4) salva resposta
   if (agent.reply) {
+    // Simula digitação antes de enviar (se habilitado e remoteJid disponível)
+    const cfg = await getAgentConfig();
+    if ((cfg.simulate_typing ?? true) && remoteJid && sock) {
+      try {
+        await sock.sendPresenceUpdate("composing", remoteJid);
+        const typingDelay = Math.min(1000 + agent.reply.length * 30, 5000);
+        await new Promise((resolve) => setTimeout(resolve, typingDelay));
+        await sock.sendPresenceUpdate("paused", remoteJid);
+      } catch (e) {
+        console.error("[TYPING] presence update error:", e);
+      }
+    }
     updated = await appendMessage(updated, "assistant", agent.reply);
     await sendReply(agent.reply);
   }
