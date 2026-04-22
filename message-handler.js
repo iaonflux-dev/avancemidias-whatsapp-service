@@ -54,7 +54,8 @@ async function getOrCreateLeadAndConversation(phone) {
     .select("*")
     .eq("lead_id", lead.id)
     .eq("status", "active")
-    .order("started_at", { ascending: false })
+    .order("last_activity", { ascending: false })
+    .limit(1)
     .maybeSingle();
 
   if (!conv) {
@@ -92,7 +93,7 @@ async function appendMessage(conv, role, content) {
   return data;
 }
 
-async function callAgent(messages, leadPhone) {
+async function callAgent(messages, leadPhone, leadId) {
   const res = await fetch(process.env.CHAT_AGENT_URL, {
     method: "POST",
     headers: {
@@ -102,6 +103,7 @@ async function callAgent(messages, leadPhone) {
     body: JSON.stringify({
       workspace_id: process.env.WORKSPACE_ID,
       lead_phone: leadPhone,
+      lead_id: leadId,
       conversation_history: messages,
     }),
   });
@@ -213,7 +215,7 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
   // 3) chama agente
   let agent;
   try {
-    agent = await callAgent(updated.messages, phone);
+    agent = await callAgent(updated.messages, phone, lead.id);
   } catch (e) {
     console.error("[AGENT] error:", e);
     await sendReply("Desculpe, tive um problema técnico. Pode repetir em instantes?");
