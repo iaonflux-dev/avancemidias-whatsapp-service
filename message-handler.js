@@ -201,6 +201,138 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
     return;
   }
 
+  // ============================================================
+  // FILTROS DE CONVERSA — ordem: Blacklist → Etiquetas bloqueadas →
+  // Etiquetas permitidas → Conversa ativa → Palavra-chave
+  // ============================================================
+
+  // FILTRO 1 — Blacklist de números
+  const { data: blacklisted } = await supabase
+    .from("whatsapp_blacklist")
+    .select("id")
+    .eq("workspace_id", process.env.WORKSPACE_ID)
+    .eq("phone", phone)
+    .maybeSingle();
+
+  if (blacklisted) {
+    console.log(`[FILTER] Número na blacklist, ignorando: ${phone}`);
+    return;
+  }
+
+  // Carrega configurações de filtro
+  const { data: agentCfg } = await supabase
+    .from("agent_configs")
+    .select("allowed_labels, blocked_labels, activation_keyword, keyword_enabled, keyword_reply")
+    .eq("workspace_id", process.env.WORKSPACE_ID)
+    .maybeSingle();
+
+  const allowedLabels = Array.isArray(agentCfg?.allowed_labels) ? agentCfg.allowed_labels : ["Lead Meta"];
+  const blockedLabels = Array.isArray(agentCfg?.blocked_labels) ? agentCfg.blocked_labels : ["Cliente", "Perdido"];
+  const activationKeyword = agentCfg?.activation_keyword ?? "Quero saber mais";
+  const keywordEnabled = agentCfg?.keyword_enabled ?? true;
+  const keywordReply = agentCfg?.keyword_reply ?? null;
+
+  // ============================================================
+  // FILTRO 2 — Etiquetas do WhatsApp Business
+  // REGRA: Etiquetas bloqueantes SEMPRE têm prioridade absoluta
+  // sobre etiquetas permitidas, independente de quantas etiquetas
+  // o contato tiver.
+  //
+  // TABELA DE COMPORTAMENTO POR COMBINAÇÃO DE ETIQUETAS:
+  //
+  // Etiquetas do contato          | Ação do agente
+  // -------------------------------|---------------------------
+  // (nenhuma)                      | Aguarda palavra-chave
+  // "Lead Meta"                    | Assume automaticamente
+  // "Cliente"                      | Ignora
+  // "Perdido"                      | Ignora
+  // "Lead Meta" + "Cliente"        | Ignora (bloqueante vence)
+  // "Lead Meta" + "Perdido"        | Ignora (bloqueante vence)
+  // "Cliente" + "Perdido"          | Ignora
+  // "Lead Meta" + "Cliente" + ...  | Ignora (bloqueante vence)
+  // ============================================================
+  let contactLabels = [];
+  try {
+    const jid = remoteJid || (phone.replace("+", "") + "@s.whatsapp.net");
+    const contact = (typeof sock?.getContactInfo === "function")
+      ? await sock.getContactInfo(jid)
+      : null;
+    contactLabels = Array.isArray(contact?.labels) ? contact.labels : [];
+  } catch (e) {
+    console.log(`[FILTER] Não foi possível buscar etiquetas: ${e.message}`);
+    contactLabels = [];
+  }
+
+  const labelNameOf = (cl) =>
+    (typeof cl === "string" ? cl : cl?.name ?? "").toString().toLowerCase();
+
+  // PASSO 1 — Verifica etiquetas bloqueantes PRIMEIRO.
+  // Se tiver QUALQUER etiqueta bloqueante, ignora imediatamente,
+  // independente de qualquer outra etiqueta que o contato tenha.
+  const hasBlockedLabel = blockedLabels.some((blockedLabel) =>
+    contactLabels.some((cl) => labelNameOf(cl) === blockedLabel.toLowerCase()),
+  );
+
+  if (hasBlockedLabel) {
+    console.log(
+      `[FILTER] ❌ Bloqueado por etiqueta — Phone: ${phone} | Labels: ${JSON.stringify(contactLabels)}`,
+    );
+    return; // Para aqui, não verifica mais nada
+  }
+
+  // PASSO 2 — Só chega aqui se NÃO tem nenhuma etiqueta bloqueante.
+  // Agora verifica se tem etiqueta permitida.
+  const hasAllowedLabel = allowedLabels.some((allowedLabel) =>
+    contactLabels.some((cl) => labelNameOf(cl) === allowedLabel.toLowerCase()),
+  );
+
+  // FILTRO 3 — Conversa ativa existente
+  const { data: existingLead } = await supabase
+    .from("leads")
+    .select("id")
+    .eq("workspace_id", process.env.WORKSPACE_ID)
+    .eq("phone", phone)
+    .maybeSingle();
+
+  let hasActiveConversation = false;
+  if (existingLead) {
+    const { data: activeConv } = await supabase
+      .from("conversations")
+      .select("id")
+      .eq("lead_id", existingLead.id)
+      .eq("status", "active")
+      .maybeSingle();
+    hasActiveConversation = !!activeConv;
+  }
+
+  // FILTRO 4 — Palavra-chave de ativação
+  const keywordMatch =
+    keywordEnabled &&
+    typeof text === "string" &&
+    text.toLowerCase().includes(activationKeyword.toLowerCase());
+
+  const shouldEngage = hasAllowedLabel || hasActiveConversation || keywordMatch;
+
+  if (!shouldEngage) {
+    console.log(
+      `[FILTER] Mensagem ignorada — sem etiqueta permitida, sem conversa ativa e sem palavra-chave. Phone: ${phone}`,
+    );
+    return;
+  }
+
+  console.log(
+    `[FILTER] ✅ Agente assumindo conversa — Phone: ${phone} | Label: ${hasAllowedLabel} | Keyword: ${keywordMatch} | ActiveConv: ${hasActiveConversation}`,
+  );
+
+  // Resposta automática opcional ao ativar via palavra-chave (apenas no primeiro contato)
+  if (keywordMatch && !hasActiveConversation && !hasAllowedLabel && keywordReply && keywordReply.trim()) {
+    try {
+      await sendReply(keywordReply.trim());
+    } catch (e) {
+      console.error("[FILTER] Falha ao enviar keyword_reply:", e);
+    }
+  }
+
   // 1) horário de atendimento
   const window = await isWithinBusinessHours();
   if (!window.allowed) {
