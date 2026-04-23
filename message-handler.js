@@ -17,18 +17,59 @@ async function getAgentConfig() {
   return cfgCache.data;
 }
 
+// ============================================================
+// NORMALIZAÇÃO DE TEXTO
+// Remove acentos, pontuação e espaços extras para comparação
+// robusta independente de digitação do usuário
+// ============================================================
+function normalizeText(text) {
+  return (text ?? "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // remove acentos
+    .replace(/[^\w\s]/g, "")          // remove pontuação
+    .replace(/\s+/g, " ")             // normaliza espaços
+    .trim();
+}
+
+// Palavras de intenção que indicam interesse em Google Ads / marketing
+const INTENT_KEYWORDS = [
+  "google ads",
+  "anuncio",
+  "anuncios",
+  "aparecer no google",
+  "marketing",
+  "divulgacao",
+  "publicidade",
+  "mais clientes",
+  "novos clientes",
+  "atrair clientes",
+  "conquistar clientes",
+  "quero clientes",
+  "vender mais",
+  "aumentar vendas",
+  "quero saber mais",
+  "quero mais informacoes",
+  "como funciona",
+  "quanto custa",
+  "valor do servico",
+  "preco do servico",
+  "tenho interesse",
+  "me interesso",
+  "quero contratar",
+  "preciso de ajuda com",
+  "minha empresa",
+];
+
 // Debounce: agrupa mensagens em sequência por telefone
-const pendingMessages = new Map(); // phone -> { timer, messages[], sendReply, remoteJid }
+const pendingMessages = new Map();
 
 // Mapa para evitar processamento duplicado de mensagens (mesmo messageId)
-const processingMessages = new Map(); // messageId -> timestamp
+const processingMessages = new Map();
 
-// Lock por telefone para evitar processamento paralelo de mensagens do mesmo lead
-const processingLocks = new Map(); // phone -> boolean
+// Lock por telefone para evitar processamento paralelo
+const processingLocks = new Map();
 
-/**
- * Garante que existe um lead para o número e retorna { lead, conversation }.
- */
 async function getOrCreateLeadAndConversation(phone) {
   const workspaceId = process.env.WORKSPACE_ID;
 
@@ -111,12 +152,6 @@ async function callAgent(messages, leadPhone, leadId) {
   return res.json();
 }
 
-/**
- * Processa uma mensagem recebida do WhatsApp e devolve a resposta do agente.
- * Faz debounce: agrupa mensagens em sequência rápida antes de chamar o agente.
- * @param {{ phone: string, text: string, remoteJid?: string, messageId?: string }} input
- * @param {(text: string) => Promise<void>} sendReply
- */
 export async function handleIncomingMessage({ phone, text, remoteJid, messageId }, sendReply) {
   // Deduplicação: ignora se a mesma mensagem já foi processada recentemente
   if (messageId && processingMessages.has(messageId)) {
@@ -134,13 +169,11 @@ export async function handleIncomingMessage({ phone, text, remoteJid, messageId 
   const debounceEnabled = cfg.message_debounce_enabled ?? true;
   const debounceSeconds = Math.max(1, Math.min(10, cfg.message_debounce_seconds ?? 3));
 
-  // Sem debounce: processa imediatamente
   if (!debounceEnabled) {
     await processMessage({ phone, text, remoteJid }, sendReply);
     return;
   }
 
-  // Com debounce: agrupa mensagens em sequência
   const existing = pendingMessages.get(phone);
   if (existing) {
     clearTimeout(existing.timer);
@@ -165,11 +198,7 @@ export async function handleIncomingMessage({ phone, text, remoteJid, messageId 
   }, debounceSeconds * 1000);
 }
 
-/**
- * Lógica original: processa uma mensagem (já agrupada se for o caso).
- */
 async function processMessage({ phone, text, remoteJid }, sendReply) {
-  // Aguarda lock se já houver processamento em andamento para esse telefone
   if (processingLocks.get(phone)) {
     console.log(`[MSG] Aguardando lock para ${phone}`);
     await new Promise((resolve) => setTimeout(resolve, 2000));
@@ -184,10 +213,7 @@ async function processMessage({ phone, text, remoteJid }, sendReply) {
 }
 
 async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
-  console.log(`[MSG] ← ${phone}: ${text}`);
-
-  // 0) Verifica se o WhatsApp está conectado no Supabase. Se foi desconectado
-  //    pela UI, o agente para imediatamente de responder.
+  // 0) Verifica se o WhatsApp está conectado
   const { data: session } = await supabase
     .from("whatsapp_sessions")
     .select("status")
@@ -201,12 +227,7 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
     return;
   }
 
-  // ============================================================
-  // FILTROS DE CONVERSA — ordem: Blacklist → Etiquetas bloqueadas →
-  // Etiquetas permitidas → Conversa ativa → Palavra-chave
-  // ============================================================
-
-  // FILTRO 1 — Blacklist de números
+  // FILTRO 1 — Blacklist
   const { data: blacklisted } = await supabase
     .from("whatsapp_blacklist")
     .select("id")
@@ -222,7 +243,7 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
   // Carrega configurações de filtro
   const { data: agentCfg } = await supabase
     .from("agent_configs")
-    .select("allowed_labels, blocked_labels, activation_keyword, keyword_enabled, keyword_reply")
+    .select("allowed_labels, blocked_labels, activation_keyword, keyword_enabled, keyword_reply, intent_keywords")
     .eq("workspace_id", process.env.WORKSPACE_ID)
     .maybeSingle();
 
@@ -232,25 +253,12 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
   const keywordEnabled = agentCfg?.keyword_enabled ?? true;
   const keywordReply = agentCfg?.keyword_reply ?? null;
 
-  // ============================================================
+  // Palavras de intenção: combina padrão com personalizadas do banco
+  const customIntentKeywords = Array.isArray(agentCfg?.intent_keywords) ? agentCfg.intent_keywords : [];
+  const allIntentKeywords = [...INTENT_KEYWORDS, ...customIntentKeywords.map(normalizeText)];
+
   // FILTRO 2 — Etiquetas do WhatsApp Business
-  // REGRA: Etiquetas bloqueantes SEMPRE têm prioridade absoluta
-  // sobre etiquetas permitidas, independente de quantas etiquetas
-  // o contato tiver.
-  //
-  // TABELA DE COMPORTAMENTO POR COMBINAÇÃO DE ETIQUETAS:
-  //
-  // Etiquetas do contato          | Ação do agente
-  // -------------------------------|---------------------------
-  // (nenhuma)                      | Aguarda palavra-chave
-  // "Lead Meta"                    | Assume automaticamente
-  // "Cliente"                      | Ignora
-  // "Perdido"                      | Ignora
-  // "Lead Meta" + "Cliente"        | Ignora (bloqueante vence)
-  // "Lead Meta" + "Perdido"        | Ignora (bloqueante vence)
-  // "Cliente" + "Perdido"          | Ignora
-  // "Lead Meta" + "Cliente" + ...  | Ignora (bloqueante vence)
-  // ============================================================
+  // Etiquetas bloqueantes SEMPRE vencem qualquer combinação
   let contactLabels = [];
   try {
     const jid = remoteJid || (phone.replace("+", "") + "@s.whatsapp.net");
@@ -266,24 +274,17 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
   const labelNameOf = (cl) =>
     (typeof cl === "string" ? cl : cl?.name ?? "").toString().toLowerCase();
 
-  // PASSO 1 — Verifica etiquetas bloqueantes PRIMEIRO.
-  // Se tiver QUALQUER etiqueta bloqueante, ignora imediatamente,
-  // independente de qualquer outra etiqueta que o contato tenha.
   const hasBlockedLabel = blockedLabels.some((blockedLabel) =>
-    contactLabels.some((cl) => labelNameOf(cl) === blockedLabel.toLowerCase()),
+    contactLabels.some((cl) => labelNameOf(cl) === blockedLabel.toLowerCase())
   );
 
   if (hasBlockedLabel) {
-    console.log(
-      `[FILTER] ❌ Bloqueado por etiqueta — Phone: ${phone} | Labels: ${JSON.stringify(contactLabels)}`,
-    );
-    return; // Para aqui, não verifica mais nada
+    console.log(`[FILTER] ❌ Bloqueado por etiqueta — Phone: ${phone} | Labels: ${JSON.stringify(contactLabels)}`);
+    return;
   }
 
-  // PASSO 2 — Só chega aqui se NÃO tem nenhuma etiqueta bloqueante.
-  // Agora verifica se tem etiqueta permitida.
   const hasAllowedLabel = allowedLabels.some((allowedLabel) =>
-    contactLabels.some((cl) => labelNameOf(cl) === allowedLabel.toLowerCase()),
+    contactLabels.some((cl) => labelNameOf(cl) === allowedLabel.toLowerCase())
   );
 
   // FILTRO 3 — Conversa ativa existente
@@ -305,26 +306,37 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
     hasActiveConversation = !!activeConv;
   }
 
-  // FILTRO 4 — Palavra-chave de ativação
-  const keywordMatch =
-    keywordEnabled &&
-    typeof text === "string" &&
-    text.toLowerCase().includes(activationKeyword.toLowerCase());
+  // FILTRO 4 — Palavra-chave e intenção (com normalização robusta)
+  const normalizedMessage = normalizeText(text);
+  const normalizedKeyword = normalizeText(activationKeyword);
+
+  // Correspondência exata normalizada (ignora acentos, pontuação, maiúsculas)
+  const exactMatch = normalizedMessage.includes(normalizedKeyword);
+
+  // Correspondência por intenção — detecta interesse mesmo sem palavra-chave exata
+  const intentMatch = allIntentKeywords.some((kw) => normalizedMessage.includes(kw));
+
+  const keywordMatch = keywordEnabled && (exactMatch || intentMatch);
+
+  // Log detalhado para diagnóstico
+  console.log(
+    `[FILTER] keyword check — msg: "${normalizedMessage}" | keyword: "${normalizedKeyword}" | exactMatch: ${exactMatch} | intentMatch: ${intentMatch} | keywordMatch: ${keywordMatch}`
+  );
 
   const shouldEngage = hasAllowedLabel || hasActiveConversation || keywordMatch;
 
   if (!shouldEngage) {
     console.log(
-      `[FILTER] Mensagem ignorada — sem etiqueta permitida, sem conversa ativa e sem palavra-chave. Phone: ${phone}`,
+      `[FILTER] Mensagem ignorada — sem etiqueta permitida, sem conversa ativa e sem palavra-chave. Phone: ${phone}`
     );
     return;
   }
 
   console.log(
-    `[FILTER] ✅ Agente assumindo conversa — Phone: ${phone} | Label: ${hasAllowedLabel} | Keyword: ${keywordMatch} | ActiveConv: ${hasActiveConversation}`,
+    `[FILTER] ✅ Agente assumindo conversa — Phone: ${phone} | Label: ${hasAllowedLabel} | Keyword: ${keywordMatch} | ActiveConv: ${hasActiveConversation}`
   );
 
-  // Resposta automática opcional ao ativar via palavra-chave (apenas no primeiro contato)
+  // Resposta automática ao ativar via palavra-chave (apenas no primeiro contato)
   if (keywordMatch && !hasActiveConversation && !hasAllowedLabel && keywordReply && keywordReply.trim()) {
     try {
       await sendReply(keywordReply.trim());
@@ -333,18 +345,18 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
     }
   }
 
-  // 1) horário de atendimento
+  // 1) Horário de atendimento
   const window = await isWithinBusinessHours();
   if (!window.allowed) {
     await sendReply(window.message ?? "Olá! Nosso atendimento está fora do horário. Retornamos em breve!");
     return;
   }
 
-  // 2) carrega/cria lead + conversa
+  // 2) Carrega/cria lead + conversa
   const { lead, conv } = await getOrCreateLeadAndConversation(phone);
   let updated = await appendMessage(conv, "user", text);
 
-  // 3) chama agente
+  // 3) Chama agente
   let agent;
   try {
     agent = await callAgent(updated.messages, phone, lead.id);
@@ -354,9 +366,8 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
     return;
   }
 
-  // 4) salva resposta
+  // 4) Salva resposta com simulação de digitação
   if (agent.reply) {
-    // Simula digitação antes de enviar (se habilitado e remoteJid disponível)
     const cfg = await getAgentConfig();
     if ((cfg.simulate_typing ?? true) && remoteJid && sock) {
       try {
@@ -372,7 +383,7 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
     await sendReply(agent.reply);
   }
 
-  // 5) atualiza lead com dados extraídos
+  // 5) Atualiza lead com dados extraídos
   if (agent.extracted) {
     const e = agent.extracted;
     await supabase.from("leads").update({
@@ -392,7 +403,7 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
     }).eq("id", lead.id);
   }
 
-  // 6) marca conversa como finalizada se status terminal
+  // 6) Marca conversa como finalizada se status terminal
   if (["qualified", "unqualified", "partial"].includes(agent.status) && agent.should_schedule !== true) {
     await supabase.from("conversations").update({ status: "finished" }).eq("id", updated.id);
   }
