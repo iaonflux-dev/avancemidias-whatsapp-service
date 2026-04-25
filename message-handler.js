@@ -153,7 +153,9 @@ async function callAgent(messages, leadPhone, leadId) {
 }
 
 export async function handleIncomingMessage({ phone, text, remoteJid, messageId }, sendReply) {
-  // Deduplicação: ignora se a mesma mensagem já foi processada recentemente
+  // ============================================================
+  // DEDUPLICAÇÃO — ignora messageId já processado recentemente
+  // ============================================================
   if (messageId && processingMessages.has(messageId)) {
     console.log(`[MSG] Duplicata ignorada: ${messageId}`);
     return;
@@ -165,11 +167,17 @@ export async function handleIncomingMessage({ phone, text, remoteJid, messageId 
 
   console.log(`[MSG] ← ${phone}: ${text}`);
 
+  // ============================================================
+  // DEBOUNCE — agrupa TODAS as mensagens do mesmo número ANTES
+  // de qualquer filtro ou processamento. O agente só responde
+  // após debounceSeconds sem nova mensagem do mesmo número.
+  // IMPORTANTE: o debounce acontece AQUI, antes dos filtros,
+  // para garantir que mensagens enviadas em sequência rápida
+  // sejam sempre agrupadas em uma única resposta.
+  // ============================================================
   const cfg = await getAgentConfig();
   const debounceEnabled = cfg.message_debounce_enabled ?? true;
-  // Mínimo de 4 segundos para garantir agrupamento de mensagens rápidas
-  // mesmo quando chegam quase simultaneamente
-  const debounceSeconds = Math.max(4, Math.min(10, cfg.message_debounce_seconds ?? 4));
+  const debounceSeconds = Math.max(10, Math.min(30, cfg.message_debounce_seconds ?? 10));
 
   if (!debounceEnabled) {
     await processMessage({ phone, text, remoteJid }, sendReply);
@@ -178,28 +186,28 @@ export async function handleIncomingMessage({ phone, text, remoteJid, messageId 
 
   const existing = pendingMessages.get(phone);
   if (existing) {
-    // Cancela o timer anterior e adiciona a nova mensagem ao grupo
+    // Já existe janela aberta — cancela timer e agrupa a nova mensagem
     clearTimeout(existing.timer);
     existing.messages.push(text);
     existing.sendReply = sendReply;
     existing.remoteJid = remoteJid;
-    console.log(`[DEBOUNCE] Agrupando mensagem de ${phone}: "${text}" (total: ${existing.messages.length})`);
+    console.log(`[DEBOUNCE] ➕ Agrupando "${text}" — total: ${existing.messages.length} mensagem(ns) de ${phone}`);
   } else {
-    // Primeira mensagem — cria entrada no mapa
+    // Primeira mensagem — abre nova janela de agrupamento
     pendingMessages.set(phone, { timer: null, messages: [text], sendReply, remoteJid });
-    console.log(`[DEBOUNCE] Nova janela de agrupamento para ${phone}: "${text}"`);
+    console.log(`[DEBOUNCE] 🕐 Janela aberta para ${phone}: "${text}" — aguardando ${debounceSeconds}s`);
   }
 
-  // Reinicia o timer — só processa após debounceSeconds sem nova mensagem
+  // Reinicia o timer — só dispara após debounceSeconds sem nova mensagem
   const entry = pendingMessages.get(phone);
   entry.timer = setTimeout(async () => {
     const pending = pendingMessages.get(phone);
     if (!pending) return;
     pendingMessages.delete(phone);
 
-    // Junta todas as mensagens com espaço entre elas
+    // Une todas as mensagens agrupadas em um único texto
     const fullText = pending.messages.join(" ");
-    console.log(`[DEBOUNCE] Processando ${pending.messages.length} mensagem(ns) de ${phone}: "${fullText}"`);
+    console.log(`[DEBOUNCE] ✅ Janela fechada — ${pending.messages.length} mensagem(ns) de ${phone}: "${fullText}"`);
 
     try {
       await processMessage({ phone, text: fullText, remoteJid: pending.remoteJid }, pending.sendReply);
@@ -208,6 +216,7 @@ export async function handleIncomingMessage({ phone, text, remoteJid, messageId 
     }
   }, debounceSeconds * 1000);
 }
+
 
 async function processMessage({ phone, text, remoteJid }, sendReply) {
   if (processingLocks.get(phone)) {
