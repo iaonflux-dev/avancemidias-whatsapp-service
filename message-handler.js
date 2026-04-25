@@ -27,8 +27,8 @@ function normalizeText(text) {
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "") // remove acentos
-    .replace(/[^\w\s]/g, "")          // remove pontuação
-    .replace(/\s+/g, " ")             // normaliza espaços
+    .replace(/[^\w\s]/g, "") // remove pontuação
+    .replace(/\s+/g, " ") // normaliza espaços
     .trim();
 }
 
@@ -217,7 +217,6 @@ export async function handleIncomingMessage({ phone, text, remoteJid, messageId 
   }, debounceSeconds * 1000);
 }
 
-
 async function processMessage({ phone, text, remoteJid }, sendReply) {
   if (processingLocks.get(phone)) {
     console.log(`[MSG] Aguardando lock para ${phone}`);
@@ -281,21 +280,18 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
   // Etiquetas bloqueantes SEMPRE vencem qualquer combinação
   let contactLabels = [];
   try {
-    const jid = remoteJid || (phone.replace("+", "") + "@s.whatsapp.net");
-    const contact = (typeof sock?.getContactInfo === "function")
-      ? await sock.getContactInfo(jid)
-      : null;
+    const jid = remoteJid || phone.replace("+", "") + "@s.whatsapp.net";
+    const contact = typeof sock?.getContactInfo === "function" ? await sock.getContactInfo(jid) : null;
     contactLabels = Array.isArray(contact?.labels) ? contact.labels : [];
   } catch (e) {
     console.log(`[FILTER] Não foi possível buscar etiquetas: ${e.message}`);
     contactLabels = [];
   }
 
-  const labelNameOf = (cl) =>
-    (typeof cl === "string" ? cl : cl?.name ?? "").toString().toLowerCase();
+  const labelNameOf = (cl) => (typeof cl === "string" ? cl : (cl?.name ?? "")).toString().toLowerCase();
 
   const hasBlockedLabel = blockedLabels.some((blockedLabel) =>
-    contactLabels.some((cl) => labelNameOf(cl) === blockedLabel.toLowerCase())
+    contactLabels.some((cl) => labelNameOf(cl) === blockedLabel.toLowerCase()),
   );
 
   if (hasBlockedLabel) {
@@ -304,7 +300,7 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
   }
 
   const hasAllowedLabel = allowedLabels.some((allowedLabel) =>
-    contactLabels.some((cl) => labelNameOf(cl) === allowedLabel.toLowerCase())
+    contactLabels.some((cl) => labelNameOf(cl) === allowedLabel.toLowerCase()),
   );
 
   // FILTRO 3 — Conversa ativa existente
@@ -340,20 +336,20 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
 
   // Log detalhado para diagnóstico
   console.log(
-    `[FILTER] keyword check — msg: "${normalizedMessage}" | keyword: "${normalizedKeyword}" | exactMatch: ${exactMatch} | intentMatch: ${intentMatch} | keywordMatch: ${keywordMatch}`
+    `[FILTER] keyword check — msg: "${normalizedMessage}" | keyword: "${normalizedKeyword}" | exactMatch: ${exactMatch} | intentMatch: ${intentMatch} | keywordMatch: ${keywordMatch}`,
   );
 
   const shouldEngage = hasAllowedLabel || hasActiveConversation || keywordMatch;
 
   if (!shouldEngage) {
     console.log(
-      `[FILTER] Mensagem ignorada — sem etiqueta permitida, sem conversa ativa e sem palavra-chave. Phone: ${phone}`
+      `[FILTER] Mensagem ignorada — sem etiqueta permitida, sem conversa ativa e sem palavra-chave. Phone: ${phone}`,
     );
     return;
   }
 
   console.log(
-    `[FILTER] ✅ Agente assumindo conversa — Phone: ${phone} | Label: ${hasAllowedLabel} | Keyword: ${keywordMatch} | ActiveConv: ${hasActiveConversation}`
+    `[FILTER] ✅ Agente assumindo conversa — Phone: ${phone} | Label: ${hasAllowedLabel} | Keyword: ${keywordMatch} | ActiveConv: ${hasActiveConversation}`,
   );
 
   // Resposta automática ao ativar via palavra-chave (apenas no primeiro contato)
@@ -406,21 +402,24 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
   // 5) Atualiza lead com dados extraídos
   if (agent.extracted) {
     const e = agent.extracted;
-    await supabase.from("leads").update({
-      name: e.name || lead.name,
-      company: e.company || lead.company,
-      city: e.city || lead.city,
-      segment: e.segment || lead.segment,
-      company_size: e.size || lead.company_size,
-      main_challenge: e.challenge || lead.main_challenge,
-      currently_using_ads: typeof e.using_ads === "boolean" ? e.using_ads : lead.currently_using_ads,
-      score: typeof e.score === "number" ? e.score : lead.score,
-      qualification_status:
-        agent.status === "qualified" || agent.status === "partial" || agent.status === "unqualified"
-          ? agent.status
-          : lead.qualification_status,
-      qualification_reason: agent.qualification_reason ?? lead.qualification_reason,
-    }).eq("id", lead.id);
+    await supabase
+      .from("leads")
+      .update({
+        name: e.name || lead.name,
+        company: e.company || lead.company,
+        city: e.city || lead.city,
+        segment: e.segment || lead.segment,
+        company_size: e.size || lead.company_size,
+        main_challenge: e.challenge || lead.main_challenge,
+        currently_using_ads: typeof e.using_ads === "boolean" ? e.using_ads : lead.currently_using_ads,
+        score: typeof e.score === "number" ? e.score : lead.score,
+        qualification_status:
+          agent.status === "qualified" || agent.status === "partial" || agent.status === "unqualified"
+            ? agent.status
+            : lead.qualification_status,
+        qualification_reason: agent.qualification_reason ?? lead.qualification_reason,
+      })
+      .eq("id", lead.id);
   }
 
   // 6) Marca conversa como finalizada se status terminal
