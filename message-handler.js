@@ -177,7 +177,9 @@ export async function handleIncomingMessage({ phone, text, remoteJid, messageId 
   // ============================================================
   const cfg = await getAgentConfig();
   const debounceEnabled = cfg.message_debounce_enabled ?? true;
-  const debounceSeconds = Math.max(10, Math.min(30, cfg.message_debounce_seconds ?? 10));
+  // Padrão aumentado para 12s para capturar mensagens em sequência
+  // quando o lead demora um pouco mais entre uma e outra.
+  const debounceSeconds = Math.max(10, Math.min(30, cfg.message_debounce_seconds ?? 12));
 
   if (!debounceEnabled) {
     await processMessage({ phone, text, remoteJid }, sendReply);
@@ -198,7 +200,39 @@ export async function handleIncomingMessage({ phone, text, remoteJid, messageId 
     console.log(`[DEBOUNCE] 🕐 Janela aberta para ${phone}: "${text}" — aguardando ${debounceSeconds}s`);
   }
 
-  // Reinicia o timer — só dispara após debounceSeconds sem nova mensagem
+  // Detecta se a mensagem provavelmente continua (termina em conjunção/conector)
+  // e estende o timer para dar tempo da continuação chegar.
+  const normalizeForCheck = (s) =>
+    (s ?? "")
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^\w\s]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  const incompleteEndings = [
+    "antes",
+    "primeiro",
+    "mas",
+    "porem",
+    "e",
+    "tambem",
+    "alem",
+    "que",
+    "se",
+    "porque",
+    "pois",
+  ];
+  const lastWord = normalizeForCheck(text).split(" ").pop() ?? "";
+  const likelyContinues = incompleteEndings.includes(lastWord);
+  const effectiveDebounce = likelyContinues ? debounceSeconds * 2 : debounceSeconds;
+  if (likelyContinues) {
+    console.log(
+      `[DEBOUNCE] ⏳ Mensagem provavelmente incompleta (termina em "${lastWord}") — estendendo janela para ${effectiveDebounce}s`,
+    );
+  }
+
+  // Reinicia o timer — só dispara após effectiveDebounce sem nova mensagem
   const entry = pendingMessages.get(phone);
   entry.timer = setTimeout(async () => {
     const pending = pendingMessages.get(phone);
@@ -214,7 +248,7 @@ export async function handleIncomingMessage({ phone, text, remoteJid, messageId 
     } catch (e) {
       console.error("[DEBOUNCE] processMessage error:", e);
     }
-  }, debounceSeconds * 1000);
+  }, effectiveDebounce * 1000);
 }
 
 async function processMessage({ phone, text, remoteJid }, sendReply) {
