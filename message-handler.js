@@ -32,6 +32,18 @@ function normalizeText(text) {
     .trim();
 }
 
+// ============================================================
+// NORMALIZAÇÃO DE TELEFONE
+// Remove tudo que não for dígito e adiciona "+" na frente.
+// Garante que a comparação com a blacklist seja consistente
+// independente do formato em que o número chegou pelo Baileys
+// ou foi salvo pelo usuário no painel.
+// ============================================================
+function normalizePhone(phone) {
+  const digits = (phone ?? "").replace(/\D/g, "");
+  return "+" + digits;
+}
+
 // Palavras de intenção que indicam interesse em Google Ads / marketing
 const INTENT_KEYWORDS = [
   "google ads",
@@ -281,15 +293,18 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
   }
 
   // FILTRO 1 — Blacklist
+  // Normaliza o telefone recebido para comparar contra os formatos
+  // mais comuns que podem estar salvos no banco (com ou sem "+").
+  const normalizedPhone = normalizePhone(phone);
   const { data: blacklisted } = await supabase
     .from("whatsapp_blacklist")
     .select("id")
     .eq("workspace_id", process.env.WORKSPACE_ID)
-    .eq("phone", phone)
+    .or(`phone.eq.${normalizedPhone},phone.eq.${normalizedPhone.replace("+", "")}`)
     .maybeSingle();
 
   if (blacklisted) {
-    console.log(`[FILTER] Número na blacklist, ignorando: ${phone}`);
+    console.log(`[FILTER] ❌ Número na blacklist, ignorando: ${phone}`);
     return;
   }
 
