@@ -293,18 +293,18 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
   }
 
   // FILTRO 1 — Blacklist
-  // Normaliza o telefone recebido para comparar contra os formatos
-  // mais comuns que podem estar salvos no banco (com ou sem "+").
-  const normalizedPhone = normalizePhone(phone);
+  // Verificação robusta: usa a coluna calculada `phone_digits`,
+  // que ignora "+", espaços e qualquer formatação salva.
+  const phoneDigits = (phone ?? "").replace(/\D/g, "");
   const { data: blacklisted } = await supabase
     .from("whatsapp_blacklist")
     .select("id")
     .eq("workspace_id", process.env.WORKSPACE_ID)
-    .or(`phone.eq.${normalizedPhone},phone.eq.${normalizedPhone.replace("+", "")}`)
+    .eq("phone_digits", phoneDigits)
     .maybeSingle();
 
   if (blacklisted) {
-    console.log(`[FILTER] ❌ Número na blacklist, ignorando: ${phone}`);
+    console.log(`[FILTER] ❌ Blacklist — ignorando: ${phone}`);
     return;
   }
 
@@ -325,17 +325,24 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
   const customIntentKeywords = Array.isArray(agentCfg?.intent_keywords) ? agentCfg.intent_keywords : [];
   const allIntentKeywords = [...INTENT_KEYWORDS, ...customIntentKeywords.map(normalizeText)];
 
-  // FILTRO 2 — Etiquetas do WhatsApp Business
-  // Etiquetas bloqueantes SEMPRE vencem qualquer combinação
+  // FILTRO 2 — Etiquetas do contato
+  // Como o Baileys tem suporte limitado a etiquetas do WhatsApp Business,
+  // o sistema usa a tabela `contact_labels` gerenciada manualmente
+  // pelo painel. Garantia: 100% confiável independente do Baileys.
   let contactLabels = [];
   try {
-    const jid = remoteJid || phone.replace("+", "") + "@s.whatsapp.net";
-    const contact = typeof sock?.getContactInfo === "function" ? await sock.getContactInfo(jid) : null;
-    contactLabels = Array.isArray(contact?.labels) ? contact.labels : [];
+    const { data: contactLabelData } = await supabase
+      .from("contact_labels")
+      .select("labels")
+      .eq("workspace_id", process.env.WORKSPACE_ID)
+      .eq("phone_digits", phoneDigits)
+      .maybeSingle();
+    contactLabels = Array.isArray(contactLabelData?.labels) ? contactLabelData.labels : [];
   } catch (e) {
-    console.log(`[FILTER] Não foi possível buscar etiquetas: ${e.message}`);
+    console.log(`[FILTER] Não foi possível buscar etiquetas do banco: ${e.message}`);
     contactLabels = [];
   }
+  console.log(`[FILTER] Labels de ${phone}: ${JSON.stringify(contactLabels)}`);
 
   const labelNameOf = (cl) => (typeof cl === "string" ? cl : (cl?.name ?? "")).toString().toLowerCase();
 
@@ -352,16 +359,39 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
     contactLabels.some((cl) => labelNameOf(cl) === allowedLabel.toLowerCase()),
   );
 
-  // FILTRO 3 — Conversa ativa existente
+  // FILTRO 3 — Conversa ativa existente + verificação de pausa do agente
   const { data: existingLead } = await supabase
     .from("leads")
-    .select("id")
+    .select("id, agent_paused, agent_paused_until")
     .eq("workspace_id", process.env.WORKSPACE_ID)
     .eq("phone", phone)
     .maybeSingle();
 
   let hasActiveConversation = false;
   if (existingLead) {
+    // ============================================================
+    // PAUSA DO AGENTE POR LEAD
+    // Se o usuário assumiu a conversa manualmente, o agente não responde
+    // até a pausa expirar (ou ser reativada pelo painel).
+    // ============================================================
+    const isPaused = existingLead.agent_paused === true;
+    const pausedUntil = existingLead.agent_paused_until
+      ? new Date(existingLead.agent_paused_until)
+      : null;
+
+    if (isPaused && (!pausedUntil || pausedUntil > new Date())) {
+      console.log(`[FILTER] ⏸️ Agente pausado para ${phone} — usuário assumiu a conversa`);
+      return;
+    }
+
+    if (isPaused && pausedUntil && pausedUntil <= new Date()) {
+      await supabase
+        .from("leads")
+        .update({ agent_paused: false, agent_paused_until: null, agent_paused_reason: null })
+        .eq("id", existingLead.id);
+      console.log(`[FILTER] ▶️ Pausa expirada — agente reativado para ${phone}`);
+    }
+
     const { data: activeConv } = await supabase
       .from("conversations")
       .select("id")
