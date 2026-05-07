@@ -451,6 +451,29 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
   const { lead, conv } = await getOrCreateLeadAndConversation(phone);
   let updated = await appendMessage(conv, "user", text);
 
+  // ESPELHO INBOX — mensagem do usuário
+  try {
+    await supabase.from("inbox_messages").insert({
+      workspace_id: process.env.WORKSPACE_ID,
+      conversation_id: conv.id,
+      lead_id: lead.id,
+      role: "user",
+      content: text,
+      sent_by: "user",
+      status: "delivered",
+    });
+    await supabase
+      .from("leads")
+      .update({
+        last_message_at: new Date().toISOString(),
+        last_message_preview: text.slice(0, 100),
+      })
+      .eq("id", lead.id);
+    await supabase.rpc("increment_unread", { _lead_id: lead.id });
+  } catch (e) {
+    console.error("[INBOX] insert user message error:", e);
+  }
+
   // 3) Chama agente
   let agent;
   try {
@@ -476,6 +499,28 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
     }
     updated = await appendMessage(updated, "assistant", agent.reply);
     await sendReply(agent.reply);
+
+    // ESPELHO INBOX — resposta do agente
+    try {
+      await supabase.from("inbox_messages").insert({
+        workspace_id: process.env.WORKSPACE_ID,
+        conversation_id: conv.id,
+        lead_id: lead.id,
+        role: "assistant",
+        content: agent.reply,
+        sent_by: "agent",
+        status: "sent",
+      });
+      await supabase
+        .from("leads")
+        .update({
+          last_message_at: new Date().toISOString(),
+          last_message_preview: agent.reply.slice(0, 100),
+        })
+        .eq("id", lead.id);
+    } catch (e) {
+      console.error("[INBOX] insert assistant message error:", e);
+    }
   }
 
   // 5) Atualiza lead com dados extraídos
