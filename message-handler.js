@@ -1,8 +1,11 @@
 import { createClient } from "@supabase/supabase-js";
 import { isWithinBusinessHours } from "./scheduler.js";
 import { sock } from "./index.js";
+import ws from "ws";
 
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
+  realtime: { transport: ws },
+});
 
 // Cache leve da config do agente (10s)
 let cfgCache = { data: null, ts: 0 };
