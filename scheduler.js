@@ -1,6 +1,9 @@
 import { createClient } from "@supabase/supabase-js";
+import ws from "ws";
 
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
+  realtime: { transport: ws },
+});
 
 let cache = { cfg: null, ts: 0 };
 const TTL = 60_000; // 1 min
