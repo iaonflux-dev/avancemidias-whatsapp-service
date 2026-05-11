@@ -30,8 +30,8 @@ function normalizeText(text) {
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "") // remove acentos
-    .replace(/[^\w\s]/g, "")          // remove pontuação
-    .replace(/\s+/g, " ")             // normaliza espaços
+    .replace(/[^\w\s]/g, "") // remove pontuação
+    .replace(/\s+/g, " ") // normaliza espaços
     .trim();
 }
 
@@ -189,7 +189,9 @@ export async function handleIncomingMessage({ phone, text, remoteJid, messageId 
   const effectiveDebounce = likelyContinues ? debounceSeconds * 2 : debounceSeconds;
 
   if (likelyContinues) {
-    console.log(`[DEBOUNCE] ⏳ Mensagem provavelmente incompleta (termina em "${lastWord}") — estendendo para ${effectiveDebounce}s`);
+    console.log(
+      `[DEBOUNCE] ⏳ Mensagem provavelmente incompleta (termina em "${lastWord}") — estendendo para ${effectiveDebounce}s`,
+    );
   }
 
   const entry = pendingMessages.get(phone);
@@ -285,7 +287,7 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
 
   // Etiquetas bloqueantes SEMPRE têm prioridade absoluta
   const hasBlockedLabel = blockedLabels.some((blockedLabel) =>
-    contactLabels.some((cl) => labelNameOf(cl) === blockedLabel.toLowerCase())
+    contactLabels.some((cl) => labelNameOf(cl) === blockedLabel.toLowerCase()),
   );
 
   if (hasBlockedLabel) {
@@ -294,7 +296,7 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
   }
 
   const hasAllowedLabel = allowedLabels.some((allowedLabel) =>
-    contactLabels.some((cl) => labelNameOf(cl) === allowedLabel.toLowerCase())
+    contactLabels.some((cl) => labelNameOf(cl) === allowedLabel.toLowerCase()),
   );
 
   // FILTRO 3 — Conversa ativa + pausa do agente
@@ -357,7 +359,7 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
   const keywordMatch = keywordEnabled && exactMatch;
 
   console.log(
-    `[FILTER] keyword check — msg: "${normalizedMessage}" | keyword: "${normalizedKeyword}" | exactMatch: ${exactMatch} | keywordMatch: ${keywordMatch}`
+    `[FILTER] keyword check — msg: "${normalizedMessage}" | keyword: "${normalizedKeyword}" | exactMatch: ${exactMatch} | keywordMatch: ${keywordMatch}`,
   );
 
   // Decisão final de engajamento:
@@ -369,13 +371,13 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
 
   if (!shouldEngage) {
     console.log(
-      `[FILTER] 🔇 Mensagem ignorada — Phone: ${phone} | Label: ${hasAllowedLabel} | ActiveConv: ${hasActiveConversation} | Keyword: ${keywordMatch}`
+      `[FILTER] 🔇 Mensagem ignorada — Phone: ${phone} | Label: ${hasAllowedLabel} | ActiveConv: ${hasActiveConversation} | Keyword: ${keywordMatch}`,
     );
     return;
   }
 
   console.log(
-    `[FILTER] ✅ Agente assumindo — Phone: ${phone} | Label: ${hasAllowedLabel} | Keyword: ${keywordMatch} | ActiveConv: ${hasActiveConversation}`
+    `[FILTER] ✅ Agente assumindo — Phone: ${phone} | Label: ${hasAllowedLabel} | Keyword: ${keywordMatch} | ActiveConv: ${hasActiveConversation}`,
   );
 
   // Resposta automática ao ativar via palavra-chave (apenas primeiro contato)
