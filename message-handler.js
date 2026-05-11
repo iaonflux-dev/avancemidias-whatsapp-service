@@ -30,51 +30,18 @@ function normalizeText(text) {
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "") // remove acentos
-    .replace(/[^\w\s]/g, "") // remove pontuação
-    .replace(/\s+/g, " ") // normaliza espaços
+    .replace(/[^\w\s]/g, "")          // remove pontuação
+    .replace(/\s+/g, " ")             // normaliza espaços
     .trim();
 }
 
 // ============================================================
 // NORMALIZAÇÃO DE TELEFONE
-// Remove tudo que não for dígito e adiciona "+" na frente.
-// Garante que a comparação com a blacklist seja consistente
-// independente do formato em que o número chegou pelo Baileys
-// ou foi salvo pelo usuário no painel.
 // ============================================================
 function normalizePhone(phone) {
   const digits = (phone ?? "").replace(/\D/g, "");
   return "+" + digits;
 }
-
-// Palavras de intenção que indicam interesse em Google Ads / marketing
-const INTENT_KEYWORDS = [
-  "google ads",
-  "anuncio",
-  "anuncios",
-  "aparecer no google",
-  "marketing",
-  "divulgacao",
-  "publicidade",
-  "mais clientes",
-  "novos clientes",
-  "atrair clientes",
-  "conquistar clientes",
-  "quero clientes",
-  "vender mais",
-  "aumentar vendas",
-  "quero saber mais",
-  "quero mais informacoes",
-  "como funciona",
-  "quanto custa",
-  "valor do servico",
-  "preco do servico",
-  "tenho interesse",
-  "me interesso",
-  "quero contratar",
-  "preciso de ajuda com",
-  "minha empresa",
-];
 
 // Debounce: agrupa mensagens em sequência por telefone
 const pendingMessages = new Map();
@@ -184,16 +151,10 @@ export async function handleIncomingMessage({ phone, text, remoteJid, messageId 
 
   // ============================================================
   // DEBOUNCE — agrupa TODAS as mensagens do mesmo número ANTES
-  // de qualquer filtro ou processamento. O agente só responde
-  // após debounceSeconds sem nova mensagem do mesmo número.
-  // IMPORTANTE: o debounce acontece AQUI, antes dos filtros,
-  // para garantir que mensagens enviadas em sequência rápida
-  // sejam sempre agrupadas em uma única resposta.
+  // de qualquer filtro ou processamento.
   // ============================================================
   const cfg = await getAgentConfig();
   const debounceEnabled = cfg.message_debounce_enabled ?? true;
-  // Padrão aumentado para 12s para capturar mensagens em sequência
-  // quando o lead demora um pouco mais entre uma e outra.
   const debounceSeconds = Math.max(10, Math.min(30, cfg.message_debounce_seconds ?? 12));
 
   if (!debounceEnabled) {
@@ -203,20 +164,16 @@ export async function handleIncomingMessage({ phone, text, remoteJid, messageId 
 
   const existing = pendingMessages.get(phone);
   if (existing) {
-    // Já existe janela aberta — cancela timer e agrupa a nova mensagem
     clearTimeout(existing.timer);
     existing.messages.push(text);
     existing.sendReply = sendReply;
     existing.remoteJid = remoteJid;
     console.log(`[DEBOUNCE] ➕ Agrupando "${text}" — total: ${existing.messages.length} mensagem(ns) de ${phone}`);
   } else {
-    // Primeira mensagem — abre nova janela de agrupamento
     pendingMessages.set(phone, { timer: null, messages: [text], sendReply, remoteJid });
     console.log(`[DEBOUNCE] 🕐 Janela aberta para ${phone}: "${text}" — aguardando ${debounceSeconds}s`);
   }
 
-  // Detecta se a mensagem provavelmente continua (termina em conjunção/conector)
-  // e estende o timer para dar tempo da continuação chegar.
   const normalizeForCheck = (s) =>
     (s ?? "")
       .toLowerCase()
@@ -225,36 +182,22 @@ export async function handleIncomingMessage({ phone, text, remoteJid, messageId 
       .replace(/[^\w\s]/g, " ")
       .replace(/\s+/g, " ")
       .trim();
-  const incompleteEndings = [
-    "antes",
-    "primeiro",
-    "mas",
-    "porem",
-    "e",
-    "tambem",
-    "alem",
-    "que",
-    "se",
-    "porque",
-    "pois",
-  ];
+
+  const incompleteEndings = ["antes", "primeiro", "mas", "porem", "e", "tambem", "alem", "que", "se", "porque", "pois"];
   const lastWord = normalizeForCheck(text).split(" ").pop() ?? "";
   const likelyContinues = incompleteEndings.includes(lastWord);
   const effectiveDebounce = likelyContinues ? debounceSeconds * 2 : debounceSeconds;
+
   if (likelyContinues) {
-    console.log(
-      `[DEBOUNCE] ⏳ Mensagem provavelmente incompleta (termina em "${lastWord}") — estendendo janela para ${effectiveDebounce}s`,
-    );
+    console.log(`[DEBOUNCE] ⏳ Mensagem provavelmente incompleta (termina em "${lastWord}") — estendendo para ${effectiveDebounce}s`);
   }
 
-  // Reinicia o timer — só dispara após effectiveDebounce sem nova mensagem
   const entry = pendingMessages.get(phone);
   entry.timer = setTimeout(async () => {
     const pending = pendingMessages.get(phone);
     if (!pending) return;
     pendingMessages.delete(phone);
 
-    // Une todas as mensagens agrupadas em um único texto
     const fullText = pending.messages.join(" ");
     console.log(`[DEBOUNCE] ✅ Janela fechada — ${pending.messages.length} mensagem(ns) de ${phone}: "${fullText}"`);
 
@@ -296,8 +239,6 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
   }
 
   // FILTRO 1 — Blacklist
-  // Verificação robusta: usa a coluna calculada `phone_digits`,
-  // que ignora "+", espaços e qualquer formatação salva.
   const phoneDigits = (phone ?? "").replace(/\D/g, "");
   const { data: blacklisted } = await supabase
     .from("whatsapp_blacklist")
@@ -314,24 +255,17 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
   // Carrega configurações de filtro
   const { data: agentCfg } = await supabase
     .from("agent_configs")
-    .select("allowed_labels, blocked_labels, activation_keyword, keyword_enabled, keyword_reply, intent_keywords")
+    .select("allowed_labels, blocked_labels, activation_keyword, keyword_enabled, keyword_reply")
     .eq("workspace_id", process.env.WORKSPACE_ID)
     .maybeSingle();
 
   const allowedLabels = Array.isArray(agentCfg?.allowed_labels) ? agentCfg.allowed_labels : ["Lead Meta"];
   const blockedLabels = Array.isArray(agentCfg?.blocked_labels) ? agentCfg.blocked_labels : ["Cliente", "Perdido"];
-  const activationKeyword = agentCfg?.activation_keyword ?? "Quero saber mais";
+  const activationKeyword = agentCfg?.activation_keyword ?? "Olá, quero conquistar mais clientes com o Google Ads.";
   const keywordEnabled = agentCfg?.keyword_enabled ?? true;
   const keywordReply = agentCfg?.keyword_reply ?? null;
 
-  // Palavras de intenção: combina padrão com personalizadas do banco
-  const customIntentKeywords = Array.isArray(agentCfg?.intent_keywords) ? agentCfg.intent_keywords : [];
-  const allIntentKeywords = [...INTENT_KEYWORDS, ...customIntentKeywords.map(normalizeText)];
-
-  // FILTRO 2 — Etiquetas do contato
-  // Como o Baileys tem suporte limitado a etiquetas do WhatsApp Business,
-  // o sistema usa a tabela `contact_labels` gerenciada manualmente
-  // pelo painel. Garantia: 100% confiável independente do Baileys.
+  // FILTRO 2 — Etiquetas do contato (via tabela contact_labels)
   let contactLabels = [];
   try {
     const { data: contactLabelData } = await supabase
@@ -342,15 +276,16 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
       .maybeSingle();
     contactLabels = Array.isArray(contactLabelData?.labels) ? contactLabelData.labels : [];
   } catch (e) {
-    console.log(`[FILTER] Não foi possível buscar etiquetas do banco: ${e.message}`);
+    console.log(`[FILTER] Não foi possível buscar etiquetas: ${e.message}`);
     contactLabels = [];
   }
   console.log(`[FILTER] Labels de ${phone}: ${JSON.stringify(contactLabels)}`);
 
   const labelNameOf = (cl) => (typeof cl === "string" ? cl : (cl?.name ?? "")).toString().toLowerCase();
 
+  // Etiquetas bloqueantes SEMPRE têm prioridade absoluta
   const hasBlockedLabel = blockedLabels.some((blockedLabel) =>
-    contactLabels.some((cl) => labelNameOf(cl) === blockedLabel.toLowerCase()),
+    contactLabels.some((cl) => labelNameOf(cl) === blockedLabel.toLowerCase())
   );
 
   if (hasBlockedLabel) {
@@ -359,10 +294,10 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
   }
 
   const hasAllowedLabel = allowedLabels.some((allowedLabel) =>
-    contactLabels.some((cl) => labelNameOf(cl) === allowedLabel.toLowerCase()),
+    contactLabels.some((cl) => labelNameOf(cl) === allowedLabel.toLowerCase())
   );
 
-  // FILTRO 3 — Conversa ativa existente + verificação de pausa do agente
+  // FILTRO 3 — Conversa ativa + pausa do agente
   const { data: existingLead } = await supabase
     .from("leads")
     .select("id, agent_paused, agent_paused_until")
@@ -372,15 +307,8 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
 
   let hasActiveConversation = false;
   if (existingLead) {
-    // ============================================================
-    // PAUSA DO AGENTE POR LEAD
-    // Se o usuário assumiu a conversa manualmente, o agente não responde
-    // até a pausa expirar (ou ser reativada pelo painel).
-    // ============================================================
     const isPaused = existingLead.agent_paused === true;
-    const pausedUntil = existingLead.agent_paused_until
-      ? new Date(existingLead.agent_paused_until)
-      : null;
+    const pausedUntil = existingLead.agent_paused_until ? new Date(existingLead.agent_paused_until) : null;
 
     if (isPaused && (!pausedUntil || pausedUntil > new Date())) {
       console.log(`[FILTER] ⏸️ Agente pausado para ${phone} — usuário assumiu a conversa`);
@@ -404,37 +332,53 @@ async function _doProcessMessage({ phone, text, remoteJid }, sendReply) {
     hasActiveConversation = !!activeConv;
   }
 
-  // FILTRO 4 — Palavra-chave e intenção (com normalização robusta)
+  // ============================================================
+  // FILTRO 4 — PALAVRA-CHAVE DE ATIVAÇÃO (CORRESPONDÊNCIA EXATA)
+  //
+  // REGRA: o agente SÓ é ativado para novos contatos se a mensagem
+  // for EXATAMENTE igual à palavra-chave configurada.
+  // NÃO usa lógica de intenção ou palavras parciais.
+  // A normalização apenas remove acentos, pontuação e espaços extras
+  // para tolerância mínima de digitação.
+  //
+  // Exemplos com keyword = "Olá, quero conquistar mais clientes com o Google Ads.":
+  // ✅ "Olá, quero conquistar mais clientes com o Google Ads." → ativa
+  // ✅ "ola quero conquistar mais clientes com o google ads"  → ativa (normalização)
+  // ❌ "Oi"                                                   → ignora
+  // ❌ "quero mais clientes"                                  → ignora
+  // ❌ "google ads"                                           → ignora
+  // ❌ "quero saber mais"                                     → ignora
+  // ============================================================
   const normalizedMessage = normalizeText(text);
   const normalizedKeyword = normalizeText(activationKeyword);
 
-  // Correspondência exata normalizada (ignora acentos, pontuação, maiúsculas)
-  const exactMatch = normalizedMessage.includes(normalizedKeyword);
+  // USA === (igualdade total) — NÃO usa .includes()
+  const exactMatch = normalizedMessage === normalizedKeyword;
+  const keywordMatch = keywordEnabled && exactMatch;
 
-  // Correspondência por intenção — detecta interesse mesmo sem palavra-chave exata
-  const intentMatch = allIntentKeywords.some((kw) => normalizedMessage.includes(kw));
-
-  const keywordMatch = keywordEnabled && (exactMatch || intentMatch);
-
-  // Log detalhado para diagnóstico
   console.log(
-    `[FILTER] keyword check — msg: "${normalizedMessage}" | keyword: "${normalizedKeyword}" | exactMatch: ${exactMatch} | intentMatch: ${intentMatch} | keywordMatch: ${keywordMatch}`,
+    `[FILTER] keyword check — msg: "${normalizedMessage}" | keyword: "${normalizedKeyword}" | exactMatch: ${exactMatch} | keywordMatch: ${keywordMatch}`
   );
 
+  // Decisão final de engajamento:
+  // 1. Etiqueta permitida → ativa automaticamente (leads do anúncio)
+  // 2. Conversa ativa → continua respondendo
+  // 3. Palavra-chave exata → ativa novo contato
+  // Qualquer outro caso → ignora silenciosamente
   const shouldEngage = hasAllowedLabel || hasActiveConversation || keywordMatch;
 
   if (!shouldEngage) {
     console.log(
-      `[FILTER] Mensagem ignorada — sem etiqueta permitida, sem conversa ativa e sem palavra-chave. Phone: ${phone}`,
+      `[FILTER] 🔇 Mensagem ignorada — Phone: ${phone} | Label: ${hasAllowedLabel} | ActiveConv: ${hasActiveConversation} | Keyword: ${keywordMatch}`
     );
     return;
   }
 
   console.log(
-    `[FILTER] ✅ Agente assumindo conversa — Phone: ${phone} | Label: ${hasAllowedLabel} | Keyword: ${keywordMatch} | ActiveConv: ${hasActiveConversation}`,
+    `[FILTER] ✅ Agente assumindo — Phone: ${phone} | Label: ${hasAllowedLabel} | Keyword: ${keywordMatch} | ActiveConv: ${hasActiveConversation}`
   );
 
-  // Resposta automática ao ativar via palavra-chave (apenas no primeiro contato)
+  // Resposta automática ao ativar via palavra-chave (apenas primeiro contato)
   if (keywordMatch && !hasActiveConversation && !hasAllowedLabel && keywordReply && keywordReply.trim()) {
     try {
       await sendReply(keywordReply.trim());
